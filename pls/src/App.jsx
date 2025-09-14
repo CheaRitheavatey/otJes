@@ -1,202 +1,168 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Play, Square, Camera, Settings as SettingsIcon, Sun, Moon } from 'lucide-react';
-import { VideoPlayer } from './components/VideoPlayer';
-import { SubtitleOverlay } from './components/SubtitleOverlay';
-import { DetectionPanel } from './components/DetectionPanel';
-import { SettingsPanel } from './components/SettingsPanel';
-import { SubtitleHistory } from './components/SubtitleHistory';
-import { TeachableMachineSettings } from './components/TeachableMachineSettings';
-import { AboutPage } from './components/AboutPage';
-import { useCamera } from './hooks/useCamera';
-import { useSignDetection } from './hooks/useSignDetection';
-import { useSubtitles } from './hooks/useSubtitles';
-import { DEFAULT_SETTINGS } from './types';
+// frontend/src/App.js
+import React, { useState, useRef, useEffect } from 'react';
+import axios from 'axios';
+import './App.css';
 
 function App() {
-  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
-  const [isLiveMode, setIsLiveMode] = useState(true);
-  const [showSettings, setShowSettings] = useState(false);
-  const [currentPage, setCurrentPage] = useState('main'); // 'main' or 'about'
-  const videoContainerRef = useRef(null);
-  
-  const { cameraState, videoRef, startCamera, stopCamera } = useCamera();
-  const { 
-    isInitialized,
-    detectedSigns, 
-    currentGesture,
-    isDetecting, 
-    isProcessing,
-    canvasRef,
-    modelInfo,
-    initializeModel,
-    startDetection, 
-    stopDetection, 
-    clearDetections, 
-    translateSign
-  } = useSignDetection(settings);
-  const { subtitles, currentSubtitle, processSignsToText, exportSRT, clearSubtitles } = useSubtitles(settings);
+  const [prediction, setPrediction] = useState(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [cameraError, setCameraError] = useState(null);
+  const [supportedWords, setSupportedWords] = useState([]);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const intervalRef = useRef(null);
 
   useEffect(() => {
-    processSignsToText(detectedSigns, translateSign);
-  }, [detectedSigns, processSignsToText, translateSign]);
+    fetchSupportedWords();
+  }, []);
 
-  const handleStartDetection = async () => {
-    if (isLiveMode && !cameraState.isActive) {
-      await startCamera();
-      // Wait a bit for camera to initialize
-      setTimeout(() => {
-        if (videoRef.current) {
-          startDetection(videoRef.current);
-        }
-      }, 1000);
-    } else if (isLiveMode && videoRef.current) {
-      startDetection(videoRef.current);
-    } else {
-      startDetection();
+  const fetchSupportedWords = async () => {
+    try {
+      const response = await axios.get('http://localhost:8000/api/words');
+      setSupportedWords(response.data.words);
+    } catch (error) {
+      console.error('Error fetching supported words:', error);
     }
   };
 
-  const handleStopDetection = () => {
-    stopDetection();
-    if (isLiveMode) {
-      stopCamera();
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { width: 640, height: 480 } 
+      });
+      videoRef.current.srcObject = stream;
+      setIsRecording(true);
+      setCameraError(null);
+    } catch (error) {
+      setCameraError('Cannot access camera: ' + error.message);
+      setIsRecording(false);
     }
   };
 
-  const toggleTheme = () => {
-    const newTheme = settings.theme === 'light' ? 'dark' : 'light';
-    setSettings(prev => ({ ...prev, theme: newTheme }));
+  const stopCamera = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      const stream = videoRef.current.srcObject;
+      const tracks = stream.getTracks();
+      tracks.forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+    }
+    setIsRecording(false);
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+    }
   };
 
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', settings.theme === 'dark');
-  }, [settings.theme]);
+  const captureAndPredict = async () => {
+    if (!videoRef.current || !canvasRef.current) return;
 
-  // Handle page navigation
-  if (currentPage === 'about') {
-    return <AboutPage onBackToMain={() => setCurrentPage('main')} />;
-  }
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas.getContext('2d');
+
+    // Draw current video frame to canvas
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // Convert canvas to base64
+    const base64Image = canvas.toDataURL('image/jpeg');
+
+    try {
+      const response = await axios.post('http://localhost:8080/api/predict-base64', {
+        image: base64Image
+      });
+
+      setPrediction(response.data);
+    } catch (error) {
+      console.error('Prediction error:', error);
+      setPrediction({
+        predicted_word: 'ERROR',
+        confidence: 0,
+        status: 'error'
+      });
+    }
+  };
+
+  const startRealTimePrediction = () => {
+    startCamera();
+    // Predict every 500ms
+    intervalRef.current = setInterval(captureAndPredict, 500);
+  };
+
+  const stopRealTimePrediction = () => {
+    stopCamera();
+  };
 
   return (
-    <div className={`app ${settings.theme}`}>
-      {/* Header */}
-      <header className="app-header">
-        <div className="header-content">
-          <div className="header-left">
-            <div className="app-logo">
-              <Camera size={20} />
-            </div>
-            <div className="app-info">
-              <h1 className="app-title">Sign Language Converter</h1>
-              <p className="app-subtitle">Real-time ASL detection with custom model</p>
-            </div>
-          </div>
-          
-          <div className="header-actions">
-            <button
-              onClick={toggleTheme}
-              className="header-btn theme-btn"
-            >
-              {settings.theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
-            </button>
-            
-            <button
-              onClick={() => setShowSettings(!showSettings)}
-              className={`header-btn settings-btn ${showSettings ? 'active' : ''}`}
-            >
-              <SettingsIcon size={20} />
-            </button>
-            
-            <button
-              onClick={() => setCurrentPage('about')}
-              className="header-btn demo-btn"
-            >
-              <Play size={16} />
-              <span>About</span>
-            </button>
-            
-            {isDetecting ? (
-              <button
-                onClick={handleStopDetection}
-                className="header-btn stop-btn"
-              >
-                <Square size={16} />
-                <span>Stop Detection</span>
-              </button>
-            ) : (
-              <button
-                onClick={handleStartDetection}
-                className="header-btn start-btn"
-                disabled={!isInitialized}
-              >
-                <Play size={16} />
-                <span>{isInitialized ? 'Start Detection' : 'Loading Model...'}</span>
-              </button>
-            )}
-          </div>
-        </div>
+    <div className="App">
+      <header className="App-header">
+        <h1>Sign Language to Subtitle</h1>
+        <p>Real-time sign language detection using AI</p>
       </header>
 
-      {/* Main Content */}
-      <main className="app-main">
-        <div className="main-grid">
-          {/* Video Section */}
-          <div className="video-section">
-            <div ref={videoContainerRef} className="video-wrapper">
-              <VideoPlayer
-                isLiveMode={isLiveMode}
-                onModeChange={setIsLiveMode}
-                cameraRef={videoRef}
-                canvasRef={canvasRef}
-              />
-              
-              <SubtitleOverlay
-                currentSubtitle={currentSubtitle}
-                settings={settings}
-                containerRef={videoContainerRef}
-              />
-            </div>
-            
-            {cameraState.error && (
-              <div className="error-message">
-                <p>
-                  <strong>Camera Error:</strong> {cameraState.error}
-                </p>
-              </div>
-            )}
+      <main className="main-content">
+        <div className="camera-section">
+          <div className="video-container">
+            <video
+              ref={videoRef}
+              autoPlay
+              muted
+              playsInline
+              className="camera-feed"
+            />
+            <canvas
+              ref={canvasRef}
+              width="640"
+              height="480"
+              style={{ display: 'none' }}
+            />
           </div>
-          
-          {/* Sidebar */}
-          <div className="sidebar">
-            {showSettings && (
-              <SettingsPanel
-                settings={settings}
-                onSettingsChange={setSettings}
-              />
+
+          <div className="controls">
+            {!isRecording ? (
+              <button onClick={startRealTimePrediction} className="btn-start">
+                Start Detection
+              </button>
+            ) : (
+              <button onClick={stopRealTimePrediction} className="btn-stop">
+                Stop Detection
+              </button>
             )}
             
-            <TeachableMachineSettings
-              isInitialized={isInitialized}
-              isProcessing={isProcessing}
-              modelInfo={modelInfo}
-              onInitializeModel={initializeModel}
-            />
-            
-            <DetectionPanel
-              detectedSigns={detectedSigns}
-              currentGesture={currentGesture}
-              isDetecting={isDetecting}
-              isInitialized={isInitialized}
-              isProcessing={isProcessing}
-              settings={settings}
-              translateSign={translateSign}
-            />
-            
-            <SubtitleHistory
-              subtitles={subtitles}
-              onExportSRT={exportSRT}
-              onClearHistory={clearSubtitles}
-            />
+            <button onClick={captureAndPredict} className="btn-capture">
+              Capture & Predict
+            </button>
+          </div>
+
+          {cameraError && (
+            <div className="error-message">
+              {cameraError}
+            </div>
+          )}
+        </div>
+
+        <div className="results-section">
+          <h2>Prediction Results</h2>
+          
+          {prediction && (
+            <div className="prediction-result">
+              <div className="predicted-word">
+                {prediction.predicted_word}
+              </div>
+              <div className="confidence">
+                Confidence: {(prediction.confidence * 100).toFixed(2)}%
+              </div>
+              <div className="status">
+                Status: {prediction.status}
+              </div>
+            </div>
+          )}
+
+          <div className="supported-words">
+            <h3>Supported Words</h3>
+            <div className="words-list">
+              {supportedWords.map((word, index) => (
+                <span key={index} className="word-tag">{word}</span>
+              ))}
+            </div>
           </div>
         </div>
       </main>
